@@ -1,0 +1,53 @@
+import cv2
+import open3d as o3d
+import numpy as np
+# Read depth map and color map
+# depth_map_path = "./Data/ETH3d/DSC_0331_depth.jpg"
+# color_map_path = "./Data/ETH3d/DSC_0331.JPG"
+depth_map_path = "./Data/TestData/img1_depth.jpg"
+color_map_path = "./Data/TestData/img1.jpg"
+depth_map = cv2.imread(depth_map_path, cv2.IMREAD_UNCHANGED)  # Read depth map as is (including alpha channel)
+color_map = cv2.imread(color_map_path)
+
+# Create a point cloud from the depth map and color map
+def create_point_cloud(depth_map, color_map):
+    # Intrinsic parameters (example values, replace with actual values)
+    focal_length = 3000.0  # Example focal length in pixels
+    principal_point = (depth_map.shape[1] / 2, depth_map.shape[0] / 2)  # Principal point (image center)
+    intrinsic_matrix = np.array([[focal_length, 0, principal_point[0]],
+                                 [0, focal_length, principal_point[1]],
+                                 [0, 0, 1]])
+
+    # Depth scale factor (converts depth values to meters)
+    depth_scale = 0.001  # Example: depth values are in millimeters, so scale by 0.001 to get meters
+
+    # Create point cloud
+    points = []
+    colors = []
+
+    for v in range(depth_map.shape[0]):
+        for u in range(depth_map.shape[1]):
+            depth = depth_map[v, u] * depth_scale
+            if depth == 0:  # Invalid depth value
+                continue
+
+            # Calculate 3D point in camera coordinates
+            x = (u - principal_point[0]) * depth / focal_length
+            y = (v - principal_point[1]) * depth / focal_length
+            z = depth
+
+            points.append([x, y, z])
+            colors.append(color_map[v, u] / 255.0)  # Normalize color values to range [0, 1]
+
+    # Create Open3D point cloud
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+    pcd.colors = o3d.utility.Vector3dVector(colors)
+
+    return pcd
+
+# Create point cloud
+point_cloud = create_point_cloud(depth_map, color_map)
+
+# Visualize point cloud
+o3d.visualization.draw_geometries([point_cloud])
