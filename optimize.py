@@ -204,21 +204,27 @@ if __name__ == "__main__":
     v0 = H/2#1512
 
     num_img = 10#number of images
-    num_iter = 3000#number of iterations
+    num_iter = 5000#number of iterations
     #3. Initialize parameters
 
     alpha = torch.ones((num_img,1), requires_grad=True) #alpha[i] is global scale of ith image
     beta = torch.zeros((num_img,1),  requires_grad=True) #beta[i] is global shift of ith image
+
+    alpha_local = torch.ones((num_img,H,W), requires_grad=True) #alpha[i][v][u] is local scale of ith image
+    beta_local = torch.zeros((num_img,H,W), requires_grad=True) #beta[i][v][u] is local scale of ith image
+
+
+
     f = torch.tensor([1.2],requires_grad=True) # focal length, f=f_x=f_y
     pose_6dof = torch.zeros((num_img,6), requires_grad=True)# 6DoF parameters in the order of tx, ty, tz, rx, ry, rz; pose_6dof[i] represent T_wi(transform from world to i_th camera coordinate)
-    # weights = torch.ones((num_img,1),requires_grad=True)# sparse point weights
+    # confidence = torch.ones((num_img,1),requires_grad=True)# sparse point weights
 
 
     K = torch.tensor([[f , 0. , u0],
                     [0. , f , v0],
                     [0. , 0. , 1. ]])
 
-    optimizer = optim.Adam(params=[alpha, beta, f, pose_6dof],lr=0.001)
+    optimizer = optim.Adam(params=[alpha, beta, alpha_local, beta_local,f, pose_6dof],lr=0.001)
     loss=[]
     #5.
     # Training loop
@@ -247,8 +253,11 @@ if __name__ == "__main__":
             depth_mono_j.requires_grad=True
             
 
-            depth_i = depth_mono_i * alpha[i] + beta[i]#[3024,4032]
-            depth_j = depth_mono_j * alpha[j] + beta[j]#[3024,4032]
+            depth_i_global = depth_mono_i * alpha[i] + beta[i]#[3024,4032]
+            depth_j_global = depth_mono_j * alpha[j] + beta[j]#[3024,4032]
+
+            depth_i = alpha_local[i] * depth_i_global + beta_local[i]#[3024,4032]
+            depth_j = alpha_local[j] * depth_j_global + beta_local[j]#[3024,4032]
 
             #14 compute T_ij
             T_wi = pose_vecToMat(pose_6dof[i].reshape(1,1,6))#[1,4,4]
@@ -309,10 +318,11 @@ if __name__ == "__main__":
 
             #Loss2: compute pixel wise geometric loss
 
-            L_gc = torch.sum(torch.abs(j_d_ij_valid-j_d_valid))
+            L_gc = torch.sum(torch.abs(j_d_ij_valid -j_d_valid )) 
+            # L_rg = torch.sum(1-confidence)
 
 
-            L = L_gc
+            L = L_gc 
             loss.append(L.detach().numpy())
                     
             print(L.detach().numpy())
