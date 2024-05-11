@@ -7,6 +7,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image
 from torchvision import transforms
+
+import time
 def torch_det_2x2(tensor):
     '''
     tensor: torch.tensor, [B, 2, 2]
@@ -43,7 +45,7 @@ def torch_inverse_3x3(tensor):
 
     return tensor_new
 
-def torch_inverse_T(T):
+def torch_inverse_T(T,device='cpu'):
     '''
     T: torch.tensor, [B,4,4]
 
@@ -57,7 +59,7 @@ def torch_inverse_T(T):
     t_inv = -t # [B,3,1]
 
     temp = torch.cat([R_inv,t_inv],dim=2)#[B,3,4]
-    temp2 = torch.tensor([0,0,0,1]).repeat([B,1,1])#[B,1,4]
+    temp2 = torch.tensor([0,0,0,1],device=device).repeat([B,1,1])#[B,1,4]
     T_inv = torch.cat([temp,temp2],dim=1)#[B,4,4]
     return T_inv
 
@@ -121,7 +123,7 @@ def quat2mat(quat):
                           2*xz - 2*wy, 2*wx + 2*yz, w2 - x2 - y2 + z2], dim=1).reshape(B, 3, 3)
     return rotMat
 
-def pose_vecToMat(vec, rotation_mode='euler'):
+def pose_vecToMat(vec, rotation_mode='euler',device='cpu'):
     """
     Convert 6DoF parameters to transformation matrix.
     Args:s
@@ -142,7 +144,7 @@ def pose_vecToMat(vec, rotation_mode='euler'):
     transform_mat = torch.cat([rot_mat, translation], dim=2)  # [B, 3, 4]
 
 
-    T = torch.cat([transform_mat,torch.tensor([0,0,0,1]).repeat([B,1,1])],dim=1)
+    T = torch.cat([transform_mat,torch.tensor([0,0,0,1],device=device).repeat([B,1,1])],dim=1)
     return T
 def warp_ij(i_u,i_v,i_d,K,T_wi,T_wj):
     '''
@@ -185,6 +187,11 @@ def warp_ij(i_u,i_v,i_d,K,T_wi,T_wj):
 if __name__ == "__main__":
     path_dataset = "./Data/Dataset1/"
 
+    #0. Check if GPU is available
+    # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cpu")
+    print("Device:{0}".format(device))
+
     # 1. Load images and depth maps
     depth_mono=[]
     images = []
@@ -194,9 +201,9 @@ if __name__ == "__main__":
         images.append(transform(Image.open(path_dataset + 'depth_' + str(img_id) + '.jpg')))
 
     # Stack the list of tensors along a new dimension
-    depth_mono_stacked = torch.stack(depth_mono, dim=0)#[10,1,3024,4032]
+    depth_mono_stacked = torch.stack(depth_mono, dim=0).to(device)#[10,1,3024,4032]
+    images = [img.to(device) for img in images]
 
-    print(images[0].shape)
     H = images[0].shape[1]#3024
     W = images[0].shape[2]#4032
 
@@ -204,34 +211,37 @@ if __name__ == "__main__":
     v0 = H/2#1512
 
     num_img = 10#number of images
-    num_iter = 5000#number of iterations
+    num_iter = 500#number of iterations
     #3. Initialize parameters
 
-    alpha = torch.ones((num_img,1), requires_grad=True) #alpha[i] is global scale of ith image
-    beta = torch.zeros((num_img,1),  requires_grad=True) #beta[i] is global shift of ith image
+    alpha = torch.ones((num_img,1), requires_grad=True, device=device) #alpha[i] is global scale of ith image
+    beta = torch.zeros((num_img,1),  requires_grad=True, device=device) #beta[i] is global shift of ith image
 
-    alpha_local = torch.ones((num_img,H,W), requires_grad=True) #alpha[i][v][u] is local scale of ith image
-    beta_local = torch.zeros((num_img,H,W), requires_grad=True) #beta[i][v][u] is local scale of ith image
+    alpha_local = torch.ones((num_img,H,W), requires_grad=True, device=device) #alpha[i][v][u] is local scale of ith image
+    beta_local = torch.zeros((num_img,H,W), requires_grad=True, device=device) #beta[i][v][u] is local scale of ith image
 
 
 
-    f = torch.tensor([1.2],requires_grad=True) # focal length, f=f_x=f_y
-    pose_6dof = torch.zeros((num_img,6), requires_grad=True)# 6DoF parameters in the order of tx, ty, tz, rx, ry, rz; pose_6dof[i] represent T_wi(transform from world to i_th camera coordinate)
+    f = torch.tensor([1.2],requires_grad=True, device=device) # focal length, f=f_x=f_y
+    pose_6dof = torch.zeros((num_img,6), requires_grad=True, device=device)# 6DoF parameters in the order of tx, ty, tz, rx, ry, rz; pose_6dof[i] represent T_wi(transform from world to i_th camera coordinate)
     # confidence = torch.ones((num_img,1),requires_grad=True)# sparse point weights
 
 
     K = torch.tensor([[f , 0. , u0],
                     [0. , f , v0],
-                    [0. , 0. , 1. ]])
+                    [0. , 0. , 1. ]],device=device)
 
+
+    
     optimizer = optim.Adam(params=[alpha, beta, alpha_local, beta_local,f, pose_6dof],lr=0.001)
-    loss=[]
+    loss_record=[]
     #5.
     # Training loop
     num_epochs = 1
     for epoch in range(num_epochs):
 
         for iter in range(num_iter):
+            time_iter_start = time.time()
             
             #random sample pairs here!!
             i = random.randint(0,num_img-1)
@@ -260,9 +270,9 @@ if __name__ == "__main__":
             depth_j = alpha_local[j] * depth_j_global + beta_local[j]#[3024,4032]
 
             #14 compute T_ij
-            T_wi = pose_vecToMat(pose_6dof[i].reshape(1,1,6))#[1,4,4]
-            T_wj = pose_vecToMat(pose_6dof[j].reshape(1,1,6))#[1,4,4]
-            T_iw = torch_inverse_T(T_wi)#[1,4,4]
+            T_wi = pose_vecToMat(pose_6dof[i].reshape(1,1,6),device=device)#[1,4,4]
+            T_wj = pose_vecToMat(pose_6dof[j].reshape(1,1,6),device=device)#[1,4,4]
+            T_iw = torch_inverse_T(T_wi,device=device)#[1,4,4]
             T_ij = torch.mm(T_iw.reshape(4,4),T_wj.reshape(4,4))#[1,4,4]
 
             L_gc = 0.
@@ -278,18 +288,18 @@ if __name__ == "__main__":
             y_coords_flat = y_coords.flatten()
 
             # Randomly sample points from the image grid
-            num_sample = 10000
+            num_sample = 60000
             random_indices = np.random.choice(range(H * W), num_sample, replace=False)
 
             # Extract the sampled points from the image grid
             sampled_x_coords = x_coords_flat[random_indices]
             sampled_y_coords = y_coords_flat[random_indices]
-            i_u_int = torch.tensor(sampled_x_coords).reshape((num_sample,1))#[num_sample,1]
-            i_v_int = torch.tensor(sampled_y_coords).reshape((num_sample,1))#[num_sample,1]
+            i_u_int = torch.tensor(sampled_x_coords).reshape((num_sample,1)).to(device)#[num_sample,1]
+            i_v_int = torch.tensor(sampled_y_coords).reshape((num_sample,1)).to(device)#[num_sample,1]
 
             #convert to pytorch tensor in float data type, and reshape 
-            i_u = torch.tensor(sampled_x_coords).reshape((num_sample,1)).float()#[num_sample,1]
-            i_v = torch.tensor(sampled_y_coords).reshape((num_sample,1)).float()#[num_sample,1]
+            i_u = torch.tensor(sampled_x_coords).reshape((num_sample,1)).float().to(device)#[num_sample,1]
+            i_v = torch.tensor(sampled_y_coords).reshape((num_sample,1)).float().to(device)#[num_sample,1]
 
             #sample from depth map
             i_d = depth_i[i_v_int,i_u_int]#[num_sample,1]
@@ -304,6 +314,8 @@ if __name__ == "__main__":
             j_u_ij_valid = j_u_ij[valid_indices]#[num_sample_valid,1]
             j_v_ij_valid = j_v_ij[valid_indices]#[num_sample_valid,1]
             j_d_ij_valid = j_d_ij[valid_indices]#[num_sample_valid,1]
+
+            num_sample_valid = j_d_ij_valid.shape[0]
             # Round the tensors to the nearest integer
             j_u_ij_valid_rounded = torch.round(j_u_ij_valid).int()
             j_v_ij_valid_rounded = torch.round(j_v_ij_valid).int()
@@ -318,20 +330,26 @@ if __name__ == "__main__":
 
             #Loss2: compute pixel wise geometric loss
 
-            L_gc = torch.sum(torch.abs(j_d_ij_valid -j_d_valid )) 
+            L_gc =  (1/num_sample_valid)* torch.sum(torch.abs(j_d_ij_valid -j_d_valid )) 
             # L_rg = torch.sum(1-confidence)
 
 
             L = L_gc 
-            loss.append(L.detach().numpy())
+            loss_record.append(L.detach())
                     
-            print(L.detach().numpy())
+            
             optimizer.zero_grad()
             L.backward()
             optimizer.step()
+
+            time_iter_end = time.time()
+            iter_time = time_iter_end - time_iter_start
+            print("iter:{0} ; Loss:{1} ; time_per_iter:{2}".format(iter,L.detach().numpy(),iter_time))
+
+        
                 
                 
     #visualization
-    plt.plot(loss)
+    plt.plot(loss_record)
     plt.show()
 

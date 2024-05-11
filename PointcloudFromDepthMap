@@ -1,25 +1,103 @@
 import cv2
 import open3d as o3d
 import numpy as np
-# Read depth map and color map
-# depth_map_path = "./Data/ETH3d/DSC_0331_depth.jpg"
-# color_map_path = "./Data/ETH3d/DSC_0331.JPG"
-depth_map_path = "./Data/TestData/img1_depth.jpg"
-color_map_path = "./Data/TestData/img1.jpg"
-depth_map = cv2.imread(depth_map_path, cv2.IMREAD_UNCHANGED)  # Read depth map as is (including alpha channel)
-color_map = cv2.imread(color_map_path)
+import numpy as np
+from sklearn.neighbors import NearestNeighbors
 
-# Create a point cloud from the depth map and color map
-def create_point_cloud(depth_map, color_map):
+
+def best_fit_transform(A, B):
+    '''
+    Calculates the least-squares best-fit transform that maps corresponding points A to B in m spatial dimensions
+    Input:
+      A: Nx3 numpy array of corresponding points
+      B: Nx3 numpy array of corresponding points
+    Returns:
+      T: 4x4 homogeneous transformation matrix that maps A on to B
+      R: 3x3 rotation matrix
+      t: 3x1 translation vector
+    '''
+
+    assert A.shape == B.shape
+
+    # get number of dimensions
+    m = A.shape[1]#3
+
+    # translate points to their centroids
+    centroid_A = np.mean(A, axis=0)
+    centroid_B = np.mean(B, axis=0)
+    AA = A - centroid_A
+    BB = B - centroid_B
+
+    # rotation matrix
+    H = np.dot(AA.T, BB)
+    U, S, Vt = np.linalg.svd(H)
+    R = np.dot(Vt.T, U.T)
+
+    # special reflection case
+    if np.linalg.det(R) < 0:
+       Vt[m-1,:] *= -1
+       R = np.dot(Vt.T, U.T)
+
+    # translation
+    t = centroid_B.T - np.dot(R,centroid_A.T)
+
+    # homogeneous transformation
+    T = np.identity(m+1)
+    T[:m, :m] = R
+    T[:m, m] = t
+
+    return T, R, t
+
+
+def nearest_neighbor(src, dst):
+    '''
+    Find the nearest (Euclidean) neighbor in dst for each point in src
+    Input:
+        src: Nxm array of points
+        dst: Nxm array of points
+    Output:
+        distances: Euclidean distances of the nearest neighbor
+        indices: dst indices of the nearest neighbor
+    '''
+
+    assert src.shape == dst.shape
+
+    neigh = NearestNeighbors(n_neighbors=1)
+    neigh.fit(dst)
+    distances, indices = neigh.kneighbors(src, return_distance=True)
+    return distances.ravel(), indices.ravel()
+
+
+def readCamPose(cam_pos_path):
+    # Read the matrix from the text file
+    with open(cam_pos_path, 'r') as file:
+        matrix_data = file.readlines()
+
+    # Parse the matrix data and convert it into a NumPy array
+    T_matrix = np.array([list(map(float, row.split())) for row in matrix_data])
+
+    # print("Transformation Matrix:")
+    # print(T_matrix)
+    return T_matrix
+
+
+def add_point_cloud(pcd,depth_map, color_map, T=np.eye(4)):
+    #extract Rotation and translation for transformation matrix
+    R_cw = T[:3,:3]
+    t_cw = T[:3,3].reshape([3,1])
+    R_wc = R_cw.T
     # Intrinsic parameters (example values, replace with actual values)
-    focal_length = 3000.0  # Example focal length in pixels
-    principal_point = (depth_map.shape[1] / 2, depth_map.shape[0] / 2)  # Principal point (image center)
-    intrinsic_matrix = np.array([[focal_length, 0, principal_point[0]],
-                                 [0, focal_length, principal_point[1]],
-                                 [0, 0, 1]])
+    focal_length_x = 5.850000000000000000e+02  # Example focal length in pixels
+    focal_length_y = 5.850000000000000000e+02  # Example focal length in pixels
+    principal_point_x = 3.200000000000000000e+02
+    principal_point_y = 2.400000000000000000e+02
+    # principal_point = (depth_map.shape[1] / 2, depth_map.shape[0] / 2)  # Principal point (image center)
+    intrinsic_matrix = np.array([[focal_length_x ,       0       ,  principal_point_x],
+                                 [     0         , focal_length_y,  principal_point_y],
+                                 [     0         ,       0       ,            1      ]])
 
     # Depth scale factor (converts depth values to meters)
-    depth_scale = 0.001  # Example: depth values are in millimeters, so scale by 0.001 to get meters
+    depth_scale = 1  # Example: depth values are in millimeters, so scale by 0.001 to get meters
 
     # Create point cloud
     points = []
@@ -32,22 +110,137 @@ def create_point_cloud(depth_map, color_map):
                 continue
 
             # Calculate 3D point in camera coordinates
-            x = (u - principal_point[0]) * depth / focal_length
-            y = (v - principal_point[1]) * depth / focal_length
-            z = depth
+            x_cam = (u - principal_point_x) * depth / focal_length_x
+            y_cam = (v - principal_point_y) * depth / focal_length_y
+            z_cam = depth
 
-            points.append([x, y, z])
+            p_cam = np.reshape([x_cam,y_cam,z_cam],[3,1])
+
+            p_w = R_wc @ (p_cam - t_cw)
+
+            points.append([p_w[0], p_w[1], p_w[2]])
             colors.append(color_map[v, u] / 255.0)  # Normalize color values to range [0, 1]
 
     # Create Open3D point cloud
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(points)
-    pcd.colors = o3d.utility.Vector3dVector(colors)
+    pcd.points.extend(o3d.utility.Vector3dVector(points))
+    pcd.colors.extend(o3d.utility.Vector3dVector(colors))
 
     return pcd
+def icp(A, B, init_pose=None, max_iterations=20, tolerance=0.001):
+    '''
+    The Iterative Closest Point method: finds best-fit transform that maps points A on to points B
+    Input:
+        A: Nxd numpy array of source mD points
+        B: Nxd numpy array of destination mD point
+        init_pose: (d+1)x(d+1) homogeneous transformation
+        max_iterations: exit algorithm after max_iterations
+        tolerance: convergence criteria
+    Output:
+        T: final homogeneous transformation that maps A on to B
+        distances: Euclidean distances (errors) of the nearest neighbor
+        i: number of iterations to converge
+    '''
 
-# Create point cloud
-point_cloud = create_point_cloud(depth_map, color_map)
+    assert A.shape == B.shape
 
-# Visualize point cloud
-o3d.visualization.draw_geometries([point_cloud])
+    # get number of dimensions
+    d = A.shape[1]
+
+    # make points homogeneous, copy them to maintain the originals
+    src = np.ones((d+1,A.shape[0]))
+    dst = np.ones((d+1,B.shape[0]))
+    src[:d,:] = np.copy(A.T)
+    dst[:d,:] = np.copy(B.T)
+
+    # apply the initial pose estimation
+    if init_pose is not None:
+        src = np.dot(init_pose, src)
+
+    prev_error = 0
+
+    for i in range(max_iterations):
+        # find the nearest neighbors between the current source and destination points
+        distances, indices = nearest_neighbor(src[:d,:].T, dst[:d,:].T)
+
+        # compute the transformation between the current source and nearest destination points
+        T,_,_ = best_fit_transform(src[:d,:].T, dst[:d,indices].T)
+
+        # update the current source
+        src = np.dot(T, src)
+
+        # check error
+        mean_error = np.mean(distances)
+        if np.abs(prev_error - mean_error) < tolerance:
+            break
+        prev_error = mean_error
+
+    # calculate final transformation
+    T,_,_ = best_fit_transform(A, src[:d,:].T)
+
+    return T, distances, i
+if __name__ == "__main__":
+    N = 292650
+    #--------------Add point cloud 1---------------------
+
+    # Read depth map and color map
+    depth_map_path = "./Data/Dataset3/frame-000995.depth.png"
+    color_map_path = "./Data/Dataset3/frame-000995.color.jpg"
+    cam_pos_path = "./Data/Dataset3/frame-000995.pose.txt"
+    depth_map = cv2.imread(depth_map_path, cv2.IMREAD_UNCHANGED)  # Read depth map as is (including alpha channel)
+    color_map_bgr = cv2.imread(color_map_path)
+    color_map = cv2.cvtColor(color_map_bgr, cv2.COLOR_BGR2RGB)
+    T_matrix = readCamPose(cam_pos_path) 
+
+
+    # Create point cloud
+    pcd1 = o3d.geometry.PointCloud()
+    point_cloud1 = add_point_cloud(pcd1,depth_map, color_map, T_matrix)
+
+    point_sets_1 = np.asarray(point_cloud1.points)#(N,d)
+    
+
+
+
+    #--------------Add point cloud 2---------------------
+
+    # Read depth map and color map
+    depth_map_path = "./Data/Dataset3/frame-000990.depth.png"
+    color_map_path = "./Data/Dataset3/frame-000990.color.jpg"
+    cam_pos_path = "./Data/Dataset3/frame-000990.pose.txt"
+    depth_map = cv2.imread(depth_map_path, cv2.IMREAD_UNCHANGED)  # Read depth map as is (including alpha channel)
+    color_map_bgr = cv2.imread(color_map_path)
+    color_map = cv2.cvtColor(color_map_bgr, cv2.COLOR_BGR2RGB)
+    T_matrix = readCamPose(cam_pos_path) 
+
+    pcd2 = o3d.geometry.PointCloud()
+    # Create point cloud
+    point_cloud2 = add_point_cloud(pcd2,depth_map, color_map, T_matrix)
+
+    point_sets_2 = np.asarray(point_cloud2.points)#(N,d)
+
+
+    #---------------ICP---------------------
+    N1=point_sets_1.shape[0]
+    N2=point_sets_2.shape[0]
+    if(N1<=N2):
+        point_sets_2=point_sets_2[:N1,:]
+    else:
+        point_sets_1=point_sets_1[:N2,:]
+
+    T, _, _ = icp(point_sets_1,point_sets_2)
+
+
+    #----------------combine------------------
+    R_21 = T[:3,:3]
+    t_21 = T[:3,3].reshape([3,1])
+    pcd1_corrected_points = o3d.utility.Vector3dVector((R_21 @ np.asarray(pcd1.points).T + t_21).T)
+
+    pcd_comb = o3d.geometry.PointCloud()
+    pcd_comb.points.extend(pcd1_corrected_points)
+    pcd_comb.colors.extend(pcd1.colors)
+
+    pcd_comb.points.extend(pcd2.points)
+    pcd_comb.colors.extend(pcd2.colors)
+
+    # Visualize point cloud
+    o3d.visualization.draw_geometries([pcd_comb])
